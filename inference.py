@@ -36,32 +36,60 @@ class Network:
 
     def __init__(self):
         ### TODO: Initialize any class variables desired ###
+        self.plugin = None
+        self.network = None
+        self.input_blob = None
+        self.output_blob = None
+        self.exec_network = None
+        self.infer_request = None
 
-    def load_model(self):
+    def load_model(self, model, device="CPU", cpu_extension=None):
         ### TODO: Load the model ###
+        model_xml = model
+        model_bin = os.path.splitext(model_xml)[0] + ".bin"
+        
+        self.plugin = IECore()
+        self.network = self.plugin.read_network(model=model_xml, weights=model_bin)
+        
         ### TODO: Check for supported layers ###
+#         if cpu_extension and "CPU" in device:
+#             self.plugin.add_extension(cpu_extension, device)
+            
+        self.exec_network = self.plugin.load_network(self.network, device)
+        
         ### TODO: Add any necessary extensions ###
+        self.input_blob = next(iter(self.network.inputs))
+        self.output_blob = next(iter(self.network.outputs))
+        
         ### TODO: Return the loaded inference plugin ###
         ### Note: You may need to update the function parameters. ###
         return
 
     def get_input_shape(self):
         ### TODO: Return the shape of the input layer ###
-        return
+        input_shapes = {}
+        for inp in self.network.inputs:
+            input_shapes[inp] = (self.network.inputs[inp].shape)
+        return input_shapes
 
-    def exec_net(self):
+    def exec_net(self, request_id, net_input):
         ### TODO: Start an asynchronous request ###
         ### TODO: Return any necessary information ###
         ### Note: You may need to update the function parameters. ###
+        self.infer_request_handle = self.exec_network.start_async(
+                request_id, 
+                inputs=net_input)
+
         return
 
     def wait(self):
         ### TODO: Wait for the request to be complete. ###
         ### TODO: Return any necessary information ###
         ### Note: You may need to update the function parameters. ###
-        return
+        status = self.infer_request_handle.wait()
+        return status
 
     def get_output(self):
         ### TODO: Extract and return the output results
         ### Note: You may need to update the function parameters. ###
-        return
+        return self.exec_network.requests[0].outputs[self.output_blob]

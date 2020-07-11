@@ -43,6 +43,7 @@ class Stats extends React.Component {
       case MQTT.TOPICS.DURATION:
         this.calculateDuration( payload );
         break;
+        
       default:
         break;
     }
