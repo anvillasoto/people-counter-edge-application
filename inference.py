@@ -53,7 +53,6 @@ class Network:
 
         ### DONE: Check for supported layers ###
         # inspiration for the following https://krbnite.github.io/Intel-at-the-Edge-The-Inference-Engine/
-        # Read the IR as a IENetwork
         supported_layers = self.plugin.query_network(self.network, device_name=device)
         unsupported_layers = [l for l in self.network.layers.keys() if l in supported_layers]
         if len(unsupported_layers) != 0:
