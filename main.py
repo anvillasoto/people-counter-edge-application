@@ -18,12 +18,14 @@
  OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
  WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 """
+
+import os
+import sys
+import argparse
 import time
 import socket
 import json
 import cv2
-import os
-import sys
 import numpy as np
 import logging as log
 import paho.mqtt.client as mqtt
@@ -37,10 +39,14 @@ IPADDRESS = socket.gethostbyname(HOSTNAME)
 MQTT_HOST = IPADDRESS
 MQTT_PORT = 3001
 MQTT_KEEPALIVE_INTERVAL = 60
+cpu_extension = "/opt/intel/openvino/deployment_tools/inference_engine/lib/intel64/libcpu_extension_sse4.so"
 
 # count of the number of frames to count before it is deemed as a new person
-COUNTER_THRESHOLD = 3
-
+COUNTER_THRESHOLD = 30
+REQUEST_ID = 0
+TOPIC_DURATION = "person/duration"
+TOPIC_PERSON = "person"
+ESC_KEY = 27
 
 def build_argparser():
     """
@@ -65,29 +71,65 @@ def build_argparser():
                              "specified (CPU by default)")
     parser.add_argument("-pt", "--prob_threshold", type=float, default=0.5,
                         help="Probability threshold for detections filtering"
-                        "(0.5 by default)")
+                             "(0.5 by default)")
     return parser
 
 
-
 def connect_mqtt():
-    ### TODO: Connect to the MQTT client ###
+    ### DONE: Connect to the MQTT client ###
     client = mqtt.Client()
     client.connect(MQTT_HOST, MQTT_PORT, MQTT_KEEPALIVE_INTERVAL)
     return client
 
-def preprocessing(input_image, h, w):
+
+def preprocess_image(input_image, h, w):
     '''
     Given an input image, height and width:
     - Resize to height and width
     - Transpose the final "channel" dimension to be first
-    - Reshape the image to add a "batch" of 1 at the start 
+    - Reshape the image to add a "batch" of 1 at the start
     '''
     image = cv2.resize(input_image, (w, h))
     image = image.transpose((2, 0, 1))
-    image = image.reshape(1, * image.shape)
+    image = image.reshape(1, *image.shape)
 
     return image
+
+# inspiration from this https://stackoverflow.com/questions/61537074/bounding-boxes-not-showing-for-fasterrcnn-model
+# for output shape, the author referred to here:
+# https://stackoverflow.com/questions/59471526/input-and-output-format-of-tensorflow-models
+def create_bounding_box(frame, result, width, height, prob_threshold):
+    '''
+    Draw bounding boxes onto the frame.
+    '''
+    global frame_count, location, bounding_box
+    current_count = 0
+    current_count_total = 0
+    for box in result[0][0]:
+        conf = box[2]
+
+        if conf >= prob_threshold:
+            xmin = int(box[3] * width)
+            ymin = int(box[4] * height)
+            xmax = int(box[5] * width)
+            ymax = int(box[6] * height)
+            cv2.rectangle(frame, (xmin, ymin), (xmax, ymax), (0, 0, 255), 1)
+
+            x1 = (xmax - xmin) / 2
+            y1 = (ymax - ymin) / 2
+            cx = xmin + x1
+            cy = ymin + y1
+            cv2.circle(frame, (int(cx), int(cy)), 2, (255, 0, 0), -1)
+            location.append([cx, cy])
+            current_count += 1
+            bd = np.asarray(location)
+            if len(bd) > 1:
+                diff = bd[-1] - bd[-2]
+                if abs(diff[0]) > COUNTER_THRESHOLD and abs(diff[1]) > COUNTER_THRESHOLD:
+                    current_count_total += 1
+        else:
+            bounding_box.append(0)
+    return len(location), current_count, frame, current_count_total
 
 
 def infer_on_stream(args, client):
@@ -99,31 +141,40 @@ def infer_on_stream(args, client):
     :return: None
     """
     # Initialise the class
-    infer_network = Network()
-    # Set Probability threshold for detections
-    prob_threshold = args.prob_threshold
-    
+    inference_network = Network()
+
+    # variable declarations
+    last_count_total = 0
+    total_count = 0
+    last_duration = 0
+
     # extract arguments from running to console
     model = args.model
     DEVICE = args.device
     CPU_EXTENSION = args.cpu_extension
-    
-    ### TODO: Load the model through `infer_network` ###
-    infer_network.load_model(model, DEVICE, CPU_EXTENSION)
-    
-    network_shape = infer_network.get_input_shape()
 
-    ### TODO: Handle the input stream ###
+    # Set Probability threshold for detections
+    prob_threshold = args.prob_threshold
+
+    ### DONE: Load the model through `infer_network` ###
+    inference_network.load_model(model, DEVICE, CPU_EXTENSION)
+
+    net_input_shape = inference_network.get_input_shape()
+
+    ### DONE: Handle the input stream ###
     if args.input == 'CAM':
         input_stream = 0
-    elif args.input.endswith('.jpg') or args.input.endswith('.bmp') :
+    elif args.input.endswith('.jpg') or args.input.endswith('.bmp'):
         single_image_mode = True
         input_stream = args.input
+    elif (not args.input.endswith('.jpg')) or (not (args.input.endswith('.bmp'))):
+        input_stream = args.input
+        assert os.path.isfile(args.input), "Input file does not exist"
     else:
         input_stream = args.input
-        assert os.path.isfile(args.input), "file doesn't exist"
+        log.error("The file is unsupported.please pass a supported file")
 
-    ### TODO: Handle the input stream ###
+    ### DONE: Handle the input stream ###
     cap = cv2.VideoCapture(input_stream)
 
     if input_stream:
@@ -135,92 +186,69 @@ def infer_on_stream(args, client):
     width = int(cap.get(3))
     height = int(cap.get(4))
 
-    input_shape = network_shape['image_tensor']
-
-    #iniatilize variables
-    previous_duration = 0
-    current_duration = 0
-    
-    valid_count = 0
-    counter_total = 0
-    current_counter = 0
-    previous_counter = 0
-
-    request_id = 0
-    
-    
-    ### TODO: Loop until stream is over ###
+    ### DONE: Loop until stream is over ###
     while cap.isOpened():
-        ### TODO: Read from the video capture ###
+        ### DONE: Read from the video capture ###
         flag, frame = cap.read()
         if not flag:
             break
 
-        ### TODO: Pre-process the image as needed ###
-        
-        image_processed = preprocessing(frame, input_shape[2], input_shape[3])
+        key_pressed = cv2.waitKey(60)
 
-        ### TODO: Start asynchronous inference for specified request ###
-        net_input = {'image_tensor': image_processed}
-        infer_network.exec_net(request_id, net_input)
+        inference_start = time.time()
 
-        ### TODO: Wait for the result ###
-        duration_report = None
-        if infer_network.wait() == 0:
-            ### TODO: Get the results of the inference request ###
-            inference_output = infer_network.get_output()
+        ### DONE: Pre-process the image as needed ###
 
-            ### TODO: Extract any desired stats from the results ###
-            count_on_single_frame = 0
-            output_probabilities = inference_output[0, 0, :, 2]
-            for i, p in enumerate(output_probabilities):
-                if p > prob_threshold:
-                    count_on_single_frame += 1
-                    box = inference_output[0, 0, i, 3:]
-                    p1 = (int(box[0] * width), int(box[1] * height))
-                    p2 = (int(box[2] * width), int(box[3] * height))
-                    frame = cv2.rectangle(frame, p1, p2, (0, 255, 0), 3)
-        
-            if count_on_single_frame != current_counter:
-                previous_counter = current_counter
-                current_counter = count_on_single_frame
-                if current_duration >= COUNTER_THRESHOLD:
-                    previous_duration = current_duration
-                    current_duration = 0
-                else:
-                    current_duration = previous_duration + current_duration
-                    previous_duration = 0
-            else:
-                current_duration += 1
-                if current_duration >= COUNTER_THRESHOLD:
-                    valid_count = current_counter
-                    if current_duration == COUNTER_THRESHOLD and current_counter > previous_counter:
-                        counter_total += current_counter - previous_counter
-                    elif current_duration == COUNTER_THRESHOLD and current_counter < previous_counter:
-                        duration_report = int((previous_duration / 10.0) * 1000)
+        image_processed = preprocess_image(frame, net_input_shape[2], net_input_shape[3])
 
-            ### TODO: Calculate and send relevant information on ###
-            ### current_count, total_count and duration to the MQTT server ###
-            ### Topic "person": keys of "count" and "total" ###
-            ### Topic "person/duration": key of "duration" ###
-            client.publish('person',
-                           payload=json.dumps({
-                               'count': valid_count, 'total': counter_total}),
-                           qos=0, retain=False)
-            if duration_report is not None:
-                client.publish('person/duration',
-                               payload=json.dumps({'duration': duration_report}),
-                               qos=0, retain=False)
- 
+        ### DONE: Start asynchronous inference for specified request ###
+        inference_network.exec_net(REQUEST_ID, image_processed)
 
-        ### TODO: Send the frame to the FFMPEG server ###
+        ### DONE: Wait for the result ###
+        if inference_network.wait(REQUEST_ID) == 0:
+            latency = time.time() - inference_start
+            ### DONE: Get the results of the inference request ###
+            inference_output = inference_network.get_output(REQUEST_ID)
+
+            # add the message to the frame
+            bounding_box_message = "Latency: {:.2f}ms".format(latency * 1000)
+            cv2.putText(frame, bounding_box_message, (20, 20), cv2.FONT_HERSHEY_COMPLEX, 0.5, (255, 10, 0), 1)
+
+            ### DONE: Extract any desired stats from the results ###
+            centroid, current_count, out_frame, current_count_total = \
+                create_bounding_box(frame, inference_output, width, height, prob_threshold)
+
+            ### DONE: Calculate and send relevant information on ###
+            # this is to ensure that the total count is not affected by new counts by a certain threshold that will
+            if current_count_total > last_count_total:
+                total_count = total_count + current_count_total - last_count_total
+
+            if total_count > 0:
+                # Publish messages to the MQTT server (assuming taht there is a new person detected carried by the total
+                # count above and its duration recorded)
+                if last_duration < total_count:
+                    duration = float(time.time())
+                    client.publish(TOPIC_DURATION, json.dumps({"duration": duration}))
+
+            client.publish(TOPIC_PERSON, json.dumps({"count": current_count, "total": total_count}))
+            last_count_total = current_count_total
+            last_duration = total_count
+
+        ### DONE: Send the frame to the FFMPEG server ###
         #  Resize the frame
-        frame = cv2.resize(frame, (768, 432))
         sys.stdout.buffer.write(frame)
         sys.stdout.flush()
 
+        # check for escape
+        if key_pressed == ESC_KEY:
+            break
+
     cap.release()
     cv2.destroyAllWindows()
+
+    ### DONE: Disconnect from MQTT
+    client.disconnect()
+
 
 def main():
     """
